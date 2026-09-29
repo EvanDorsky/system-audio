@@ -37,6 +37,7 @@ struct ConfigParams {
     std::optional<double> latency_ms;
     std::optional<int> historical_throttle_ms;
     std::optional<int> volume;
+    std::optional<double> keepalive_dbfs;
 };
 
 // Configuration for opening a PortAudio stream
@@ -171,6 +172,10 @@ inline ConfigParams parseConfigAttributes(const viam::sdk::ResourceConfig& cfg) 
 
     if (attrs.count("volume")) {
         params.volume = static_cast<int>(*attrs.at("volume").get<double>());
+    }
+
+    if (attrs.count("keepalive_dbfs")) {
+        params.keepalive_dbfs = *attrs.at("keepalive_dbfs").get<double>();
     }
 
     VIAM_SDK_LOG(debug) << "[parseConfigAttributes] sucessfully parsed config attributes";

@@ -1,4 +1,6 @@
 #include "speaker.hpp"
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -19,6 +21,11 @@ using audio::codec::AudioCodec;
 constexpr int MIN_VOLUME = 0;
 constexpr int MAX_VOLUME = 100;
 
+// keepalive_dbfs range. Below -90 dBFS the noise rounds to nothing at 16 bits; above
+// -20 dBFS it is plainly audible.
+constexpr double MIN_KEEPALIVE_DBFS = -90.0;
+constexpr double MAX_KEEPALIVE_DBFS = -20.0;
+
 // Distance from the buffer's lap point at which process_and_write_pcm blocks waiting for
 // the callback to drain. This is what paces a faster-than-real-time producer (TTS, file
 // playback) — and the size of the margin is the cushion against any delay in the callback
@@ -34,6 +41,12 @@ Speaker::Speaker(viam::sdk::Dependencies deps, viam::sdk::ResourceConfig cfg, au
     {
         std::lock_guard<std::mutex> lock(stream_mu_);
         audio_context_ = setup.audio_context;
+        if (setup.config_params.keepalive_dbfs) {
+            idle_noise_amplitude_ = keepalive_amplitude(*setup.config_params.keepalive_dbfs);
+            VIAM_SDK_LOG(info) << "[speaker] keepalive noise at " << *setup.config_params.keepalive_dbfs << " dBFS (peak "
+                               << idle_noise_amplitude_ << ") while nothing plays";
+        }
+        audio_context_->idle_noise_amplitude = idle_noise_amplitude_;
         setup.stream_params.user_data = setup.audio_context.get();
         stream_params_ = setup.stream_params;
         device_id_ = setup.config_params.device_id;
@@ -122,6 +135,7 @@ void Speaker::restart_stalled_stream(const std::shared_ptr<audio::OutputStreamCo
 
     const viam::sdk::audio_info info{viam::sdk::audio_codecs::PCM_16, stream_params_.sample_rate, stream_params_.num_channels};
     const auto new_context = std::make_shared<audio::OutputStreamContext>(info, audio::BUFFER_DURATION_SECONDS);
+    new_context->idle_noise_amplitude = idle_noise_amplitude_;
 
     try {
         stream_params_.user_data = new_context.get();
@@ -138,6 +152,27 @@ void Speaker::restart_stalled_stream(const std::shared_ptr<audio::OutputStreamCo
                             << audio::utils::MAX_RESTART_ATTEMPTS << "): " << e.what();
     }
 }
+
+int16_t keepalive_amplitude(double dbfs) {
+    const double amplitude = std::round(32767.0 * std::pow(10.0, dbfs / 20.0));
+    return static_cast<int16_t>(std::clamp(amplitude, 1.0, 32767.0));
+}
+
+namespace {
+
+// One sample of uniform noise in [-amplitude, amplitude]. xorshift32: cheap and
+// allocation-free, which the audio callback needs.
+int16_t next_idle_noise(audio::OutputStreamContext& ctx) {
+    uint32_t x = ctx.idle_noise_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    ctx.idle_noise_state = x;
+    const uint32_t span = 2u * static_cast<uint32_t>(ctx.idle_noise_amplitude) + 1u;
+    return static_cast<int16_t>(static_cast<int32_t>(x % span) - ctx.idle_noise_amplitude);
+}
+
+}  // namespace
 
 /**
  * PortAudio callback function - runs on real-time audio thread.
@@ -182,9 +217,17 @@ int speakerCallback(const void* inputBuffer,
     // Store updated playback position
     ctx->playback_position.store(read_pos);
 
-    // If we didn't get enough samples, fill the rest with silence
-    for (int i = samples_read; i < total_samples; i++) {
-        output[i] = 0;
+    // If we didn't get enough samples, fill the rest with silence, or with keepalive noise
+    // when keepalive_dbfs is set: some USB speakers mute their amplifier on digital
+    // silence and cut the start of the next sound while it wakes.
+    if (ctx->idle_noise_amplitude > 0) {
+        for (int i = samples_read; i < total_samples; i++) {
+            output[i] = next_idle_noise(*ctx);
+        }
+    } else {
+        for (int i = samples_read; i < total_samples; i++) {
+            output[i] = 0;
+        }
     }
 
     return paContinue;
@@ -247,6 +290,17 @@ std::vector<std::string> Speaker::validate(vsdk::ResourceConfig cfg) {
         if (vol < MIN_VOLUME || vol > MAX_VOLUME) {
             VIAM_SDK_LOG(error) << "[validate] volume must be between 0 and 100";
             throw std::invalid_argument("volume must be between 0 and 100");
+        }
+    }
+    if (attrs.count("keepalive_dbfs")) {
+        if (!attrs["keepalive_dbfs"].is_a<double>()) {
+            VIAM_SDK_LOG(error) << "[validate] keepalive_dbfs attribute must be a number";
+            throw std::invalid_argument("keepalive_dbfs attribute must be a number");
+        }
+        const double dbfs = *attrs.at("keepalive_dbfs").get<double>();
+        if (dbfs < MIN_KEEPALIVE_DBFS || dbfs > MAX_KEEPALIVE_DBFS) {
+            VIAM_SDK_LOG(error) << "[validate] keepalive_dbfs must be between -90 and -20";
+            throw std::invalid_argument("keepalive_dbfs must be between -90 and -20");
         }
     }
 

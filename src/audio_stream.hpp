@@ -38,6 +38,11 @@ class OutputStreamContext : public AudioBuffer {
     std::atomic<uint64_t> playback_position;
     std::atomic<uint64_t> output_overflow_count{0};
     std::atomic<uint64_t> output_underflow_count{0};
+    // Peak amplitude of the noise the callback writes where it has no audio; 0 writes
+    // silence. Set before the stream starts and read only by the callback.
+    int16_t idle_noise_amplitude = 0;
+    // xorshift32 state for that noise. Touched only by the callback.
+    uint32_t idle_noise_state = 0x9E3779B9u;
     OutputStreamContext(const vsdk::audio_info& audio_info, int buffer_duration_seconds = BUFFER_DURATION_SECONDS);
 };
 
