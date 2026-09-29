@@ -37,6 +37,9 @@ struct SpeakerConfigParams {
     std::optional<double> latency_ms;
 };
 
+// Peak int16 amplitude for a noise level in dBFS, at least 1.
+int16_t keepalive_amplitude(double dbfs);
+
 int speakerCallback(const void* inputBuffer,
                     void* outputBuffer,
                     unsigned long framesPerBuffer,
@@ -69,6 +72,9 @@ class Speaker final : public viam::sdk::AudioOut {
     // Member variables
     double latency_;
     std::optional<int> volume_;
+    // Keepalive noise amplitude from keepalive_dbfs; 0 when the attribute is not set.
+    // Every stream context this speaker creates gets it.
+    int16_t idle_noise_amplitude_ = 0;
     static vsdk::Model model;
 
     // This is used to ensure there is only one play() call at a time.

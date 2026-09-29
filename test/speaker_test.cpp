@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <thread>
 #include "speaker.hpp"
 #include "test_utils.hpp"
@@ -1581,6 +1582,98 @@ TEST_F(SpeakerTest, WatchdogIncrementsAttemptsOnRestartFailure) {
     EXPECT_GE(after_attempts, 1) << "failed restart should have bumped restart_attempts_";
     EXPECT_EQ(after_context.get(), initial_context.get())
         << "audio_context_ should not be swapped on failed restart";
+}
+
+TEST_F(SpeakerTest, KeepaliveAmplitudeFromDbfs) {
+    EXPECT_EQ(speaker::keepalive_amplitude(-66.0), 16);
+    EXPECT_EQ(speaker::keepalive_amplitude(-20.0), 3277);
+    // The quietest level still makes some noise
+    EXPECT_EQ(speaker::keepalive_amplitude(-90.0), 1);
+    EXPECT_EQ(speaker::keepalive_amplitude(-120.0), 1);
+}
+
+TEST_F(SpeakerTest, CallbackWritesKeepaliveNoiseWhenIdle) {
+    viam::sdk::audio_info info{viam::sdk::audio_codecs::PCM_16, 48000, 2};
+    audio::OutputStreamContext ctx(info, 30);
+    ctx.idle_noise_amplitude = 16;
+
+    const int frames_per_buffer = 256;
+    const int total_samples = frames_per_buffer * info.num_channels;
+    std::vector<int16_t> output_buffer(total_samples, 12345);
+
+    int result = speaker::speakerCallback(nullptr, output_buffer.data(), frames_per_buffer, nullptr, 0, &ctx);
+    EXPECT_EQ(result, paContinue);
+
+    int nonzero = 0;
+    for (int i = 0; i < total_samples; i++) {
+        EXPECT_LE(std::abs(output_buffer[i]), 16);
+        nonzero += output_buffer[i] != 0;
+    }
+    // Noise, not silence: almost every sample of uniform noise in [-16, 16] is nonzero
+    EXPECT_GT(nonzero, total_samples / 2);
+}
+
+TEST_F(SpeakerTest, CallbackKeepaliveNoiseFillsOnlyTheGap) {
+    viam::sdk::audio_info info{viam::sdk::audio_codecs::PCM_16, 48000, 2};
+    audio::OutputStreamContext ctx(info, 30);
+    ctx.idle_noise_amplitude = 16;
+
+    const int queued = 100;
+    for (int i = 0; i < queued; i++) {
+        ctx.write_sample(1000);
+    }
+
+    const int frames_per_buffer = 256;
+    const int total_samples = frames_per_buffer * info.num_channels;
+    std::vector<int16_t> output_buffer(total_samples);
+
+    speaker::speakerCallback(nullptr, output_buffer.data(), frames_per_buffer, nullptr, 0, &ctx);
+
+    for (int i = 0; i < queued; i++) {
+        EXPECT_EQ(output_buffer[i], 1000);
+    }
+    for (int i = queued; i < total_samples; i++) {
+        EXPECT_LE(std::abs(output_buffer[i]), 16);
+    }
+}
+
+TEST_F(SpeakerTest, ValidateKeepaliveDbfs) {
+    auto make_config = [&](ProtoStruct attributes) {
+        return ResourceConfig(
+            "rdk:component:speaker", "", test_name_, attributes, "", speaker::Speaker::model, LinkConfig{}, log_level::info);
+    };
+
+    ProtoStruct valid{};
+    valid["keepalive_dbfs"] = -66.0;
+    EXPECT_NO_THROW(speaker::Speaker::validate(make_config(valid)));
+
+    ProtoStruct not_number{};
+    not_number["keepalive_dbfs"] = std::string("quiet");
+    EXPECT_THROW(speaker::Speaker::validate(make_config(not_number)), std::invalid_argument);
+
+    ProtoStruct too_loud{};
+    too_loud["keepalive_dbfs"] = -10.0;
+    EXPECT_THROW(speaker::Speaker::validate(make_config(too_loud)), std::invalid_argument);
+
+    ProtoStruct too_quiet{};
+    too_quiet["keepalive_dbfs"] = -100.0;
+    EXPECT_THROW(speaker::Speaker::validate(make_config(too_quiet)), std::invalid_argument);
+}
+
+TEST_F(SpeakerTest, ConstructorAppliesKeepaliveDbfs) {
+    auto attributes = ProtoStruct{};
+    attributes["keepalive_dbfs"] = -66.0;
+    ResourceConfig config(
+        "rdk:component:audioout", "", test_name_, attributes, "", speaker::Speaker::model, LinkConfig{}, log_level::info);
+
+    Dependencies deps{};
+    speaker::Speaker with_keepalive(deps, config, mock_pa_.get());
+    EXPECT_EQ(with_keepalive.idle_noise_amplitude_, 16);
+    EXPECT_EQ(with_keepalive.audio_context_->idle_noise_amplitude, 16);
+
+    speaker::Speaker without_keepalive(deps, *test_config_, mock_pa_.get());
+    EXPECT_EQ(without_keepalive.idle_noise_amplitude_, 0);
+    EXPECT_EQ(without_keepalive.audio_context_->idle_noise_amplitude, 0);
 }
 
 int main(int argc, char **argv) {

@@ -90,6 +90,7 @@ The following attributes are available for the `viam:audio:speaker` model:
 | `num_channels` | int | **Optional** | The number of audio channels of the output stream. Must not exceed the device's maximum output channels. Default: 1 |
 | `latency` | int | **Optional** | Suggested output latency in milliseconds. This controls how much audio PortAudio buffers before making it available. Lower values (5-20ms) provide faster audio output but use more CPU time. Higher values (50-100ms) are more stable but less responsive. If not specified, uses the device's default low latency setting (typically 10-20ms). |
 | `volume` | int | **Optional** | Output volume as percentage (0-100). Supported on Linux devices only. On macOS, use the system volume controls (keyboard keys). |
+| `keepalive_dbfs` | number | **Optional** | Plays low-level noise at this level, in dBFS (-90 to -20), whenever nothing else plays. For speakers whose amplifier mutes on digital silence and cuts off the start of the next sound. -66 is inaudible and keeps a typical USB speaker awake. If not set, the speaker outputs silence. |
 
 #### DoCommand
 
